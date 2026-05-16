@@ -9,13 +9,47 @@ from selenium.common.exceptions import TimeoutException
 
 BASE_URL = os.getenv("BASE_URL", "https://test-env-slim.synel-saas.com")
 
-TEST_FILES_DIR = "test_files"
+# ========== ABSOLUTE PATHS FOR TEST FILES ==========
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+TEST_FILES_DIR = os.path.join(SCRIPT_DIR, "test_files")
 VALID_PDF = os.path.join(TEST_FILES_DIR, "valid.pdf")
 INVALID_TXT = os.path.join(TEST_FILES_DIR, "invalid.txt")
 LARGE_PDF = os.path.join(TEST_FILES_DIR, "large.pdf")
 
+# ========== CREATE TEST FILES IF NOT EXIST ==========
+os.makedirs(TEST_FILES_DIR, exist_ok=True)
+
+# Create valid PDF if missing
+if not os.path.exists(VALID_PDF):
+    try:
+        from reportlab.pdfgen import canvas
+        c = canvas.Canvas(VALID_PDF)
+        c.drawString(100, 750, "Test PDF for E-Sign")
+        c.save()
+        print(f"Created {VALID_PDF}")
+    except ImportError:
+        # Fallback to minimal PDF header (may work for basic uploads)
+        with open(VALID_PDF, "wb") as f:
+            f.write(b"%PDF-1.4\n%âãÏÓ\n1 0 obj\n<<\n/Type /Catalog\n/Pages 2 0 R\n>>\nendobj\n2 0 obj\n<<\n/Type /Pages\n/Kids [3 0 R]\n/Count 1\n>>\nendobj\n3 0 obj\n<<\n/Type /Page\n/MediaBox [0 0 612 792]\n/Parent 2 0 R\n/Resources <<\n/Font <<\n/F1 4 0 R\n>>\n>>\n/Contents 5 0 R\n>>\nendobj\n4 0 obj\n<<\n/Type /Font\n/Subtype /Type1\n/BaseFont /Helvetica\n>>\nendobj\n5 0 obj\n<<\n/Length 44\n>>\nstream\nBT\n/F1 24 Tf\n100 700 Td\n(Test) Tj\nET\nendstream\nendobj\nxref\n0 6\n0000000000 65535 f\n0000000015 00000 n\n0000000074 00000 n\n0000000129 00000 n\n0000000235 00000 n\n0000000302 00000 n\ntrailer\n<<\n/Size 6\n/Root 1 0 R\n>>\nstartxref\n389\n%%EOF\n")
+        print(f"Created fallback PDF at {VALID_PDF}")
+
+# Create invalid .txt file
+if not os.path.exists(INVALID_TXT):
+    with open(INVALID_TXT, "w") as f:
+        f.write("This is not a PDF file.")
+    print(f"Created {INVALID_TXT}")
+
+# Optionally create large file (26 MB) – comment out if you don't need it
+# if not os.path.exists(LARGE_PDF):
+#     with open(LARGE_PDF, "wb") as f:
+#         f.seek(26 * 1024 * 1024 - 1)
+#         f.write(b'\0')
+#     print(f"Created {LARGE_PDF}")
+
+
+# ========== HELPER FUNCTIONS ==========
 def wait_for_validation_error(driver, field_name, timeout=5):
-    """Wait for a validation error message for a specific field"""
+    """Wait for a validation error message for a specific field (by data-valmsg-for)"""
     try:
         error_span = WebDriverWait(driver, timeout).until(
             EC.presence_of_element_located((By.XPATH, f"//span[@data-valmsg-for='{field_name}' and contains(@class, 'text-danger') and not(text()='')]"))
@@ -25,43 +59,36 @@ def wait_for_validation_error(driver, field_name, timeout=5):
         return None
 
 def wait_for_success_message(driver, timeout=5):
-    """Check if success message appears after submission"""
+    """Check if success message appears or page redirects after submission"""
     try:
-        # После успешной отправки обычно происходит редирект или появляется сообщение
-        # Если редирект – проверяем URL
         WebDriverWait(driver, timeout).until(
             EC.url_changes(BASE_URL)
         )
         return "Redirected"
     except TimeoutException:
-        # Если нет редиректа, ищем сообщение об успехе на странице
+        # If no redirect, look for success text on the page
         try:
             success = driver.find_element(By.XPATH, "//*[contains(text(), 'Success') or contains(text(), 'sent') or contains(text(), 'signed')]")
             return success.text
         except:
             return None
 
-# ========== TESTS ==========
 
+# ========== TEST CASES ==========
 def test_TC01_successful_submission(driver):
     """Positive: all valid data -> success or redirect"""
     driver.get(BASE_URL)
-    
-    # Fill description
+
     driver.find_element(By.ID, "Description").send_keys("Test Contract")
-    # Select recipient
     Select(driver.find_element(By.ID, "Recipient")).select_by_visible_text("John Smith")
-    # Select category
     Select(driver.find_element(By.ID, "Category")).select_by_visible_text("Onboarding")
-    # Upload PDF
     driver.find_element(By.CSS_SELECTOR, "input[type='file']").send_keys(VALID_PDF)
-    # Fill email
     driver.find_element(By.ID, "SenderEmail").send_keys("test@example.com")
-    # Submit
     driver.find_element(By.CSS_SELECTOR, "input[type='submit']").click()
-    
+
     result = wait_for_success_message(driver)
     assert result is not None, "No success message or redirect after submission"
+
 
 def test_TC02_missing_recipient(driver):
     """Recipient not selected -> error message"""
@@ -71,43 +98,44 @@ def test_TC02_missing_recipient(driver):
     driver.find_element(By.CSS_SELECTOR, "input[type='file']").send_keys(VALID_PDF)
     driver.find_element(By.ID, "SenderEmail").send_keys("test@example.com")
     driver.find_element(By.CSS_SELECTOR, "input[type='submit']").click()
-    
-    # Recipient is required? Check validation for Recipient field
+
     error = wait_for_validation_error(driver, "Recipient")
-    # Если нет специального сообщения для Recipient, проверяем общую валидацию
     if error is None:
-        error = wait_for_validation_error(driver, "Description")  # any validation summary?
+        error = wait_for_validation_error(driver, "Description")  # fallback
     assert error is not None, "No error when recipient missing"
     assert "select" in error.lower() or "recipient" in error.lower()
 
+
 def test_TC03_missing_category(driver):
-    """Category not selected -> error or allowed (depends on requirements)"""
+    """Category not selected -> optional or required? We'll check."""
     driver.get(BASE_URL)
     driver.find_element(By.ID, "Description").send_keys("Test")
     Select(driver.find_element(By.ID, "Recipient")).select_by_visible_text("John Smith")
     driver.find_element(By.CSS_SELECTOR, "input[type='file']").send_keys(VALID_PDF)
     driver.find_element(By.ID, "SenderEmail").send_keys("test@example.com")
     driver.find_element(By.CSS_SELECTOR, "input[type='submit']").click()
-    
+
     error = wait_for_validation_error(driver, "Category")
     if error is None:
         pytest.xfail("Category may be optional – confirm requirement")
     else:
         assert "category" in error.lower() or "select" in error.lower()
 
+
 def test_TC04_empty_description(driver):
-    """Description empty (it is required according to data-val-required)"""
+    """Description empty (field is required per data-val-required)"""
     driver.get(BASE_URL)
-    # Don't fill Description
+    # Description intentionally left blank
     Select(driver.find_element(By.ID, "Recipient")).select_by_visible_text("John Smith")
     Select(driver.find_element(By.ID, "Category")).select_by_visible_text("Onboarding")
     driver.find_element(By.CSS_SELECTOR, "input[type='file']").send_keys(VALID_PDF)
     driver.find_element(By.ID, "SenderEmail").send_keys("test@example.com")
     driver.find_element(By.CSS_SELECTOR, "input[type='submit']").click()
-    
+
     error = wait_for_validation_error(driver, "Description")
     assert error is not None, "No error when Description empty"
     assert "required" in error.lower() or "description" in error.lower()
+
 
 def test_TC05_empty_email(driver):
     """Email field empty -> error (field is required)"""
@@ -118,13 +146,14 @@ def test_TC05_empty_email(driver):
     driver.find_element(By.CSS_SELECTOR, "input[type='file']").send_keys(VALID_PDF)
     # Leave email empty
     driver.find_element(By.CSS_SELECTOR, "input[type='submit']").click()
-    
+
     error = wait_for_validation_error(driver, "SenderEmail")
     assert error is not None, "No error when email empty"
     assert "required" in error.lower() or "email" in error.lower()
 
+
 def test_TC06_invalid_email_format(driver):
-    """Email without @ and domain -> should be invalid, but server-side validation may not catch it."""
+    """Email without @ and domain -> should be rejected (server-side ideally)"""
     driver.get(BASE_URL)
     driver.find_element(By.ID, "Description").send_keys("Test")
     Select(driver.find_element(By.ID, "Recipient")).select_by_visible_text("John Smith")
@@ -132,11 +161,12 @@ def test_TC06_invalid_email_format(driver):
     driver.find_element(By.CSS_SELECTOR, "input[type='file']").send_keys(VALID_PDF)
     driver.find_element(By.ID, "SenderEmail").send_keys("invalid_email")
     driver.find_element(By.CSS_SELECTOR, "input[type='submit']").click()
-    
-    # Check if browser's built-in validation catches it or server returns error
+
+    # Check for validation error (either client-side or server-side)
     error = wait_for_validation_error(driver, "SenderEmail", timeout=3)
     if error is None:
-        # Maybe HTML5 validation prevents submission? Check if page reloaded
+        # If no immediate error, maybe the submission is blocked by browser's built-in validation?
+        # If page reloads to same URL, likely no validation → bug.
         if driver.current_url == BASE_URL:
             pytest.fail("No client-side or server-side validation for invalid email format (bug)")
         else:
@@ -144,32 +174,32 @@ def test_TC06_invalid_email_format(driver):
     else:
         assert "valid" in error.lower() or "email" in error.lower()
 
+
 def test_TC07_no_file_selected(driver):
-    """No file uploaded -> error"""
+    """No file uploaded -> error (critical requirement)"""
     driver.get(BASE_URL)
     driver.find_element(By.ID, "Description").send_keys("Test")
     Select(driver.find_element(By.ID, "Recipient")).select_by_visible_text("John Smith")
     Select(driver.find_element(By.ID, "Category")).select_by_visible_text("Onboarding")
     driver.find_element(By.ID, "SenderEmail").send_keys("test@example.com")
     driver.find_element(By.CSS_SELECTOR, "input[type='submit']").click()
-    
-    # File validation might be on server side, check for any error
-    # If page reloads with same URL, check for validation summary
+
+    # If page stays on same URL, check for any error message
     if driver.current_url == BASE_URL:
-        # Try to find any error message
         try:
             error = WebDriverWait(driver, 5).until(
                 EC.presence_of_element_located((By.XPATH, "//span[contains(@class, 'text-danger') and text()!='']"))
             )
             assert "file" in error.text.lower() or "document" in error.text.lower()
-        except:
+        except TimeoutException:
             pytest.fail("No error when no file selected (bug)")
     else:
-        # Redirected? Possibly means file is optional? That would be a bug.
+        # Redirected without file → definitely a bug
         pytest.fail("Form submitted without file (bug)")
 
+
 def test_TC08_non_pdf_file(driver):
-    """Upload .txt file -> should reject"""
+    """Upload .txt file -> should be rejected"""
     driver.get(BASE_URL)
     driver.find_element(By.ID, "Description").send_keys("Test")
     Select(driver.find_element(By.ID, "Recipient")).select_by_visible_text("John Smith")
@@ -177,18 +207,22 @@ def test_TC08_non_pdf_file(driver):
     driver.find_element(By.CSS_SELECTOR, "input[type='file']").send_keys(INVALID_TXT)
     driver.find_element(By.ID, "SenderEmail").send_keys("test@example.com")
     driver.find_element(By.CSS_SELECTOR, "input[type='submit']").click()
-    
-    # If browser accepts .txt, that's a bug. Wait for potential error.
+
+    # Check if submission is blocked
     if driver.current_url == BASE_URL:
-        error = wait_for_validation_error(driver, "file", timeout=5)
-        if error:
-            assert "pdf" in error.lower() or "format" in error.lower()
-        else:
-            # Check if any server-side validation message appears
+        # Look for error message related to file type
+        try:
+            error = WebDriverWait(driver, 5).until(
+                EC.presence_of_element_located((By.XPATH, "//span[contains(@class, 'text-danger')]"))
+            )
+            assert "pdf" in error.text.lower() or "format" in error.text.lower()
+        except TimeoutException:
+            # No error message shown – maybe server-side validation? Let's check body text
             body_text = driver.find_element(By.TAG_NAME, "body").text
             assert "pdf" in body_text.lower() or "format" in body_text.lower(), "Application accepted .txt file (bug)"
     else:
         pytest.fail("Application accepted .txt file and redirected (bug)")
+
 
 def test_TC09_file_size_exceeds_25mb(driver):
     """File >25 MB -> error"""
@@ -201,12 +235,14 @@ def test_TC09_file_size_exceeds_25mb(driver):
     driver.find_element(By.CSS_SELECTOR, "input[type='file']").send_keys(LARGE_PDF)
     driver.find_element(By.ID, "SenderEmail").send_keys("test@example.com")
     driver.find_element(By.CSS_SELECTOR, "input[type='submit']").click()
-    
+
     if driver.current_url == BASE_URL:
-        error = wait_for_validation_error(driver, "file", timeout=5)
-        if error:
-            assert "25" in error.lower() or "size" in error.lower() or "mb" in error.lower()
-        else:
+        try:
+            error = WebDriverWait(driver, 5).until(
+                EC.presence_of_element_located((By.XPATH, "//span[contains(@class, 'text-danger')]"))
+            )
+            assert "25" in error.text.lower() or "size" in error.text.lower() or "mb" in error.text.lower()
+        except TimeoutException:
             body_text = driver.find_element(By.TAG_NAME, "body").text
             assert "25" in body_text.lower() or "size" in body_text.lower(), "Application accepted >25MB file (bug)"
     else:
