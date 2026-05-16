@@ -1,0 +1,50 @@
+name: Run E-Sign Selenium Tests
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+
+    - name: Install dependencies
+      run: pip install -r requirements.txt
+
+    - name: Create test_files directory
+      run: mkdir -p test_files
+
+    - name: Generate a small valid PDF for testing
+      run: |
+        # Create a simple PDF using headless libreoffice or just a placeholder
+        # For simplicity, we create an empty file (but better to use a real PDF)
+        echo "%PDF-1.4" > test_files/valid.pdf
+        echo "dummy content" >> test_files/valid.pdf
+        # Create invalid txt file
+        echo "not a pdf" > test_files/invalid.txt
+        # Generate 26MB file if needed (optional, can be skipped if test is adjusted)
+        # dd if=/dev/zero of=test_files/large.pdf bs=1M count=26
+
+    - name: Run tests
+      run: pytest test_esign.py -v --tb=short
+
+    - name: Upload test logs on failure
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: test-results
+        path: |
+          *.log
+          test_files/
